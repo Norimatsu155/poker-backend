@@ -16,7 +16,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. データモデルと役判定ロジック ---
 class Phase(str, Enum):
     PREFLOP = "PREFLOP"
     FLOP = "FLOP"
@@ -92,17 +91,10 @@ def get_current_hand_name(cards):
     ranks = [c.rank for c in cards]
     suits = [c.suit for c in cards]
     counts = sorted(Counter(ranks).values(), reverse=True)
-    
-    is_flush = False
-    for suit_count in Counter(suits).values():
-        if suit_count >= 5:
-            is_flush = True
-            break
-            
+    is_flush = any(c >= 5 for c in Counter(suits).values())
     is_straight = False
     unique_ranks = sorted(set(ranks))
-    if 14 in unique_ranks:
-        unique_ranks = [1] + unique_ranks
+    if 14 in unique_ranks: unique_ranks = [1] + unique_ranks
     consecutive = 1
     for i in range(len(unique_ranks) - 1):
         if unique_ranks[i+1] == unique_ranks[i] + 1:
@@ -121,10 +113,10 @@ def get_current_hand_name(cards):
     if counts[0] == 2: return "ワンペア"
     return "ハイカード"
 
-# --- 2. API用のゲーム管理エンジン ---
 class TexasHoldemEngine:
     def __init__(self):
         self.players = {"p1": Player("p1", "あなた", 1000), "p2": Player("p2", "CPU", 1000)}
+        self.dealer_button = "p2" # ★追加: 最初はp2を仮指定(開始時に交代するためp1が最初のSBになる)
         self.deck = Deck()
         self.community_cards = []
         self.pot = 0
@@ -150,27 +142,47 @@ class TexasHoldemEngine:
             p.current_bet = 0
             p.is_active = True
         
-        p1_blind = min(10, self.players["p1"].stack)
-        self.players["p1"].stack -= p1_blind
-        self.players["p1"].current_bet = p1_blind
+        # ★修正: ディーラーボタンの交代と、SB/BBの割り当て
+        self.dealer_button = "p2" if getattr(self, "dealer_button", "p1") == "p1" else "p1"
+        sb_id = self.dealer_button
+        bb_id = "p2" if sb_id == "p1" else "p1"
+
+        sb_player = self.players[sb_id]
+        bb_player = self.players[bb_id]
+
+        sb_actual = min(10, sb_player.stack)
+        sb_player.stack -= sb_actual
+        sb_player.current_bet = sb_actual
+
+        bb_actual = min(20, bb_player.stack)
+        bb_player.stack -= bb_actual
+        bb_player.current_bet = bb_actual
+
+        self.highest_bet = max(sb_actual, bb_actual)
+        self.pot = sb_actual + bb_actual
         
-        p2_blind = min(20, self.players["p2"].stack)
-        self.players["p2"].stack -= p2_blind
-        self.players["p2"].current_bet = p2_blind
+        # プリフロップはSB（ディーラー）から行動する
+        self.current_turn = sb_id
         
-        self.highest_bet = max(p1_blind, p2_blind)
-        self.pot = p1_blind + p2_blind
+        sb_name = "あなた" if sb_id == "p1" else "CPU"
+        bb_name = "CPU" if sb_id == "p1" else "あなた"
         
-        self.current_turn = "p1"
-        self.message = "ゲーム開始！あなたの番です。"
+        self.message = f"【開始】{sb_name}がSB(10)、{bb_name}がBB(20)を支払い。"
+
+        if self.current_turn == "p1":
+            self.message += " あなたの番です。"
+        else:
+            self._play_ai_turn()
 
     def reset_game(self, player_name="あなた"):
         self.players["p1"].stack = 1000
         self.players["p2"].stack = 1000
+        self.dealer_button = "p2" # リセット時にp1が最初のSBになるように初期化
         self.start_new_hand(player_name)
-        self.message = "【リセット】チップが初期化されました。あなたの番です！"
+        self.message = "【リセット】チップが初期化されました。"
 
     def process_action(self, player_id: str, action_type: str, amount: int):
+        self.message = "" # ★修正: アクションごとにメッセージをクリアして結合していく
         self._apply_action(player_id, action_type, amount)
         if self.phase == Phase.SHOWDOWN:
             return
@@ -187,16 +199,19 @@ class TexasHoldemEngine:
             self.phase = Phase.SHOWDOWN
             winner = self.players["p2" if player_id == "p1" else "p1"]
             winner.stack += self.pot
-            self.message = f"【決着】{player.name} がフォールドしました。 {winner.name} がポット {self.pot} を獲得！"
+            self.message += f"【決着】{player.name}がフォールド。{winner.name}が{self.pot}を獲得！"
             self.pot = 0
             
         elif action_type == "call":
             call_amount = self.highest_bet - player.current_bet
             if call_amount >= player.stack:
                 call_amount = player.stack
-                self.message = f"🔥 {player.name} がオールイン（全額コール）しました！"
+                self.message += f"🔥{player.name}がオールイン！"
             else:
-                self.message = f"{player.name} がコール/チェックしました。"
+                if call_amount == 0:
+                    self.message += f"{player.name}がチェック。"
+                else:
+                    self.message += f"{player.name}がコール。"
                 
             player.stack -= call_amount
             player.current_bet += call_amount
@@ -208,10 +223,9 @@ class TexasHoldemEngine:
             total_bet = call_amount + amount
             if total_bet >= player.stack:
                 total_bet = player.stack
-                amount = total_bet - call_amount
-                self.message = f"🔥 {player.name} がオールイン（全額ベット）しました！"
+                self.message += f"🔥{player.name}がオールイン！"
             else:
-                self.message = f"{player.name} が {amount} チップを追加レイズしました！"
+                self.message += f"{player.name}がレイズ(+{amount})！"
                 
             player.stack -= total_bet
             player.current_bet += total_bet
@@ -220,68 +234,39 @@ class TexasHoldemEngine:
             self.pot += total_bet
             self.current_turn = "p2" if player_id == "p1" else "p1"
 
-    # ★修正：CPUのAIを強化したメソッド
     def _play_ai_turn(self):
         import random
         p2 = self.players["p2"]
         call_amount = self.highest_bet - p2.current_bet
-        
-        # 1. 手札の強さを簡易評価 (0: 弱い, 1: 普通, 2: 強い)
         hand_strength = 0
         if self.phase == Phase.PREFLOP:
             ranks = [c.rank for c in p2.hand]
-            if ranks[0] == ranks[1]:
-                hand_strength = 2
-            elif max(ranks) >= 12: # Q, K, Aを持っている
-                hand_strength = 1
+            if ranks[0] == ranks[1]: hand_strength = 2
+            elif max(ranks) >= 12: hand_strength = 1
         else:
             current_hand = get_current_hand_name(p2.hand + self.community_cards)
             strong_hands = ["ワンペア", "ツーペア", "スリーカード", "ストレート", "フラッシュ", "フルハウス", "フォーカード", "ストレートフラッシュ"]
-            if current_hand in strong_hands[2:]: # スリーカード以上は強い
-                hand_strength = 2
-            elif current_hand in ["ワンペア", "ツーペア"]:
-                hand_strength = 1
+            if current_hand in strong_hands[2:]: hand_strength = 2
+            elif current_hand in ["ワンペア", "ツーペア"]: hand_strength = 1
 
-        # 2. 強さと状況に応じた行動の決定
         choice = random.random()
         action = "call"
         amount = 0
 
         if hand_strength == 2:
-            # 強い手札：ガンガン賭ける（たまに罠を張ってコールだけ）
             if choice < 0.7:
                 action = "raise"
                 amount = min(self.pot // 2 + 20, p2.stack - call_amount)
-            else:
-                action = "call"
         elif hand_strength == 1:
-            # 普通の手札：様子見コールが多いが、相手の賭け金が高すぎると降りる
-            if call_amount > self.pot // 3 and choice < 0.5:
-                action = "fold"
-            elif choice < 0.2:
-                action = "raise"
-                amount = 50
-            else:
-                action = "call"
+            if call_amount > self.pot // 3 and choice < 0.5: action = "fold"
+            elif choice < 0.2: action = "raise"; amount = 50
         else:
-            # 弱い手札：相手が賭けてきたら基本降りる。たまにブラフでレイズ
             if call_amount > 0:
-                if choice < 0.15: # 15%でブラフレイズ！
-                    action = "raise"
-                    amount = call_amount + 40
-                elif choice < 0.8: # 65%でフォールド
-                    action = "fold"
-                else: # 20%でコール（やせ我慢）
-                    action = "call"
+                if choice < 0.15: action = "raise"; amount = call_amount + 40
+                elif choice < 0.8: action = "fold"
             else:
-                # チェックで回ってきた場合
-                if choice < 0.25: # 25%で強気のブラフ
-                    action = "raise"
-                    amount = 30
-                else:
-                    action = "call"
+                if choice < 0.25: action = "raise"; amount = 30
 
-        # オールイン/限界額の安全装置
         if action == "raise":
             amount = int(amount)
             if amount <= 0 or p2.stack <= call_amount:
@@ -305,19 +290,22 @@ class TexasHoldemEngine:
         if is_round_over:
             if p1.current_bet > p2.current_bet:
                 diff = p1.current_bet - p2.current_bet
-                p1.stack += diff
-                self.pot -= diff
-                p1.current_bet = p2.current_bet
+                p1.stack += diff; self.pot -= diff; p1.current_bet = p2.current_bet
             elif p2.current_bet > p1.current_bet:
                 diff = p2.current_bet - p1.current_bet
-                p2.stack += diff
-                self.pot -= diff
-                p2.current_bet = p1.current_bet
+                p2.stack += diff; self.pot -= diff; p2.current_bet = p1.current_bet
                 
             self.advance_phase()
             if self.phase != Phase.SHOWDOWN:
-                self.current_turn = "p1"
-                self.message += " 次のカードが開かれました。あなたの番です。"
+                # ★修正: フロップ以降は「BB（ディーラーじゃない方）」から行動開始
+                bb_id = "p2" if getattr(self, "dealer_button", "p1") == "p1" else "p1"
+                self.current_turn = bb_id
+                
+                self.message += f" ➡️ {self.phase}ラウンド。"
+                if self.current_turn == "p1":
+                    self.message += " あなたの番です。"
+                else:
+                    self._play_ai_turn()
 
     def advance_phase(self):
         self.actions_this_round = 0
@@ -338,60 +326,44 @@ class TexasHoldemEngine:
             return
         
         self.highest_bet = 0
-        for p in self.players.values():
-            p.current_bet = 0
+        for p in self.players.values(): p.current_bet = 0
 
         if is_all_in and self.phase != Phase.SHOWDOWN:
             self.advance_phase()
 
     def evaluate_winner(self):
         p1, p2 = self.players["p1"], self.players["p2"]
-        p1_seven = p1.hand + self.community_cards
-        p2_seven = p2.hand + self.community_cards
-        
-        p1_eval = get_best_hand(p1_seven)
-        p2_eval = get_best_hand(p2_seven)
-        
+        p1_eval = get_best_hand(p1.hand + self.community_cards)
+        p2_eval = get_best_hand(p2.hand + self.community_cards)
         hand_names = ["ハイカード", "ワンペア", "ツーペア", "スリーカード", "ストレート", "フラッシュ", "フルハウス", "フォーカード", "ストレートフラッシュ"]
-        name1 = hand_names[p1_eval[0]]
-        name2 = hand_names[p2_eval[0]]
+        name1, name2 = hand_names[p1_eval[0]], hand_names[p2_eval[0]]
 
         if p1_eval > p2_eval:
             p1.stack += self.pot
-            self.message = f"【決着】{p1.name}の勝利！（{name1} vs {name2}） ポット {self.pot} 獲得！"
+            self.message += f"【決着】{p1.name}の勝利！（{name1} vs {name2}） ポット {self.pot} 獲得！"
         elif p2_eval > p1_eval:
             p2.stack += self.pot
-            self.message = f"【決着】CPUの勝利！（{name2} vs {name1}） ポット {self.pot} を奪われました。"
+            self.message += f"【決着】CPUの勝利！（{name2} vs {name1}） ポット {self.pot} を奪われました。"
         else:
-            p1.stack += self.pot // 2
-            p2.stack += self.pot // 2
-            self.message = f"【決着】引き分け！（{name1}） ポットを分割しました。"
-            
+            p1.stack += self.pot // 2; p2.stack += self.pot // 2
+            self.message += f"【決着】引き分け！（{name1}） ポットを分割しました。"
         self.pot = 0
 
     def get_state(self):
         p1 = self.players["p1"]
-        current_hand = ""
-        if p1.hand:
-            current_hand = get_current_hand_name(p1.hand + self.community_cards)
-
+        current_hand = get_current_hand_name(p1.hand + self.community_cards) if p1.hand else ""
         return {
             "phase": self.phase, "pot": self.pot, "current_turn": self.current_turn,
             "message": self.message, "community_cards": [c.to_dict() for c in self.community_cards],
             "players": [p.to_dict() for p in self.players.values()],
-            "p1_current_hand": current_hand
+            "p1_current_hand": current_hand,
+            "dealer_button": getattr(self, "dealer_button", "p1") # ★追加: ディーラー情報をReactに送る
         }
 
 game_instance = TexasHoldemEngine()
 
-# --- 3. FastAPI ルーターとリクエストモデル ---
-class StartRequest(BaseModel):
-    player_name: str = "あなた"
-
-class PlayerAction(BaseModel):
-    player_id: str
-    action_type: str
-    amount: int = 0
+class StartRequest(BaseModel): player_name: str = "あなた"
+class PlayerAction(BaseModel): player_id: str; action_type: str; amount: int = 0
 
 @app.post("/api/start")
 def start_game(req: StartRequest):
