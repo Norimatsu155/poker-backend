@@ -48,10 +48,13 @@ class Player:
         self.hand = []
         self.current_bet = 0
         self.is_active = True
+        self.last_action = "" # ★追加：画面に表示する最後のアクション
+
     def to_dict(self):
         return {
             "id": self.id, "name": self.name, "stack": self.stack,
             "current_bet": self.current_bet, "is_active": self.is_active,
+            "last_action": self.last_action, # ★追加
             "hand": [c.to_dict() for c in self.hand]
         }
 
@@ -116,7 +119,7 @@ def get_current_hand_name(cards):
 class TexasHoldemEngine:
     def __init__(self):
         self.players = {"p1": Player("p1", "あなた", 1000), "p2": Player("p2", "CPU", 1000)}
-        self.dealer_button = "p2" # ★追加: 最初はp2を仮指定(開始時に交代するためp1が最初のSBになる)
+        self.dealer_button = "p2"
         self.deck = Deck()
         self.community_cards = []
         self.pot = 0
@@ -141,8 +144,8 @@ class TexasHoldemEngine:
             p.hand = [self.deck.draw(), self.deck.draw()]
             p.current_bet = 0
             p.is_active = True
+            p.last_action = "" # ★初期化
         
-        # ★修正: ディーラーボタンの交代と、SB/BBの割り当て
         self.dealer_button = "p2" if getattr(self, "dealer_button", "p1") == "p1" else "p1"
         sb_id = self.dealer_button
         bb_id = "p2" if sb_id == "p1" else "p1"
@@ -153,40 +156,43 @@ class TexasHoldemEngine:
         sb_actual = min(10, sb_player.stack)
         sb_player.stack -= sb_actual
         sb_player.current_bet = sb_actual
+        sb_player.last_action = f"SB {sb_actual}" # ★記録
 
         bb_actual = min(20, bb_player.stack)
         bb_player.stack -= bb_actual
         bb_player.current_bet = bb_actual
+        bb_player.last_action = f"BB {bb_actual}" # ★記録
 
         self.highest_bet = max(sb_actual, bb_actual)
         self.pot = sb_actual + bb_actual
-        
-        # プリフロップはSB（ディーラー）から行動する
         self.current_turn = sb_id
         
         sb_name = "あなた" if sb_id == "p1" else "CPU"
         bb_name = "CPU" if sb_id == "p1" else "あなた"
-        
         self.message = f"【開始】{sb_name}がSB(10)、{bb_name}がBB(20)を支払い。"
 
         if self.current_turn == "p1":
             self.message += " あなたの番です。"
-        else:
-            self._play_ai_turn()
+        # ★削除：ここでCPUのターンになっても、React側のタイマーを待つために自動行動はさせない
 
     def reset_game(self, player_name="あなた"):
         self.players["p1"].stack = 1000
         self.players["p2"].stack = 1000
-        self.dealer_button = "p2" # リセット時にp1が最初のSBになるように初期化
+        self.dealer_button = "p2"
         self.start_new_hand(player_name)
         self.message = "【リセット】チップが初期化されました。"
 
     def process_action(self, player_id: str, action_type: str, amount: int):
-        self.message = "" # ★修正: アクションごとにメッセージをクリアして結合していく
+        self.message = ""
         self._apply_action(player_id, action_type, amount)
         if self.phase == Phase.SHOWDOWN:
             return
         self._check_round_end()
+        # ★削除：_play_ai_turn() の自動呼び出しを削除し、フロントからの指令を待つ！
+
+    # ★新規追加：Reactから「1.5秒経ったからCPU動いて！」と言われた時に実行する専用メソッド
+    def process_cpu_action(self):
+        self.message = ""
         if self.phase != Phase.SHOWDOWN and self.current_turn == "p2":
             self._play_ai_turn()
 
@@ -196,6 +202,7 @@ class TexasHoldemEngine:
 
         if action_type == "fold":
             player.is_active = False
+            player.last_action = "Fold" # ★記録
             self.phase = Phase.SHOWDOWN
             winner = self.players["p2" if player_id == "p1" else "p1"]
             winner.stack += self.pot
@@ -206,8 +213,10 @@ class TexasHoldemEngine:
             call_amount = self.highest_bet - player.current_bet
             if call_amount >= player.stack:
                 call_amount = player.stack
+                player.last_action = "All-In" # ★記録
                 self.message += f"🔥{player.name}がオールイン！"
             else:
+                player.last_action = "Check" if call_amount == 0 else f"Call {call_amount}" # ★記録
                 if call_amount == 0:
                     self.message += f"{player.name}がチェック。"
                 else:
@@ -223,8 +232,10 @@ class TexasHoldemEngine:
             total_bet = call_amount + amount
             if total_bet >= player.stack:
                 total_bet = player.stack
+                player.last_action = "All-In" # ★記録
                 self.message += f"🔥{player.name}がオールイン！"
             else:
+                player.last_action = f"Raise to {total_bet}" # ★記録
                 self.message += f"{player.name}がレイズ(+{amount})！"
                 
             player.stack -= total_bet
@@ -297,15 +308,12 @@ class TexasHoldemEngine:
                 
             self.advance_phase()
             if self.phase != Phase.SHOWDOWN:
-                # ★修正: フロップ以降は「BB（ディーラーじゃない方）」から行動開始
                 bb_id = "p2" if getattr(self, "dealer_button", "p1") == "p1" else "p1"
                 self.current_turn = bb_id
                 
                 self.message += f" ➡️ {self.phase}ラウンド。"
                 if self.current_turn == "p1":
                     self.message += " あなたの番です。"
-                else:
-                    self._play_ai_turn()
 
     def advance_phase(self):
         self.actions_this_round = 0
@@ -326,7 +334,9 @@ class TexasHoldemEngine:
             return
         
         self.highest_bet = 0
-        for p in self.players.values(): p.current_bet = 0
+        for p in self.players.values(): 
+            p.current_bet = 0
+            p.last_action = "" # ★次のフェーズに行ったらアクションの吹き出しを消す
 
         if is_all_in and self.phase != Phase.SHOWDOWN:
             self.advance_phase()
@@ -357,7 +367,7 @@ class TexasHoldemEngine:
             "message": self.message, "community_cards": [c.to_dict() for c in self.community_cards],
             "players": [p.to_dict() for p in self.players.values()],
             "p1_current_hand": current_hand,
-            "dealer_button": getattr(self, "dealer_button", "p1") # ★追加: ディーラー情報をReactに送る
+            "dealer_button": getattr(self, "dealer_button", "p1")
         }
 
 game_instance = TexasHoldemEngine()
@@ -373,6 +383,12 @@ def start_game(req: StartRequest):
 @app.post("/api/action")
 def take_action(action: PlayerAction):
     game_instance.process_action(action.player_id, action.action_type, action.amount)
+    return {"status": "success", "game_state": game_instance.get_state()}
+
+# ★新規追加：CPU専用の行動エンドポイント
+@app.post("/api/cpu_action")
+def cpu_action():
+    game_instance.process_cpu_action()
     return {"status": "success", "game_state": game_instance.get_state()}
 
 @app.post("/api/reset")
