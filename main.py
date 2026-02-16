@@ -48,13 +48,13 @@ class Player:
         self.hand = []
         self.current_bet = 0
         self.is_active = True
-        self.last_action = "" # ★追加：画面に表示する最後のアクション
+        self.last_action = ""
 
     def to_dict(self):
         return {
             "id": self.id, "name": self.name, "stack": self.stack,
             "current_bet": self.current_bet, "is_active": self.is_active,
-            "last_action": self.last_action, # ★追加
+            "last_action": self.last_action,
             "hand": [c.to_dict() for c in self.hand]
         }
 
@@ -144,7 +144,7 @@ class TexasHoldemEngine:
             p.hand = [self.deck.draw(), self.deck.draw()]
             p.current_bet = 0
             p.is_active = True
-            p.last_action = "" # ★初期化
+            p.last_action = ""
         
         self.dealer_button = "p2" if getattr(self, "dealer_button", "p1") == "p1" else "p1"
         sb_id = self.dealer_button
@@ -156,12 +156,12 @@ class TexasHoldemEngine:
         sb_actual = min(10, sb_player.stack)
         sb_player.stack -= sb_actual
         sb_player.current_bet = sb_actual
-        sb_player.last_action = f"SB {sb_actual}" # ★記録
+        sb_player.last_action = f"SB {sb_actual}"
 
         bb_actual = min(20, bb_player.stack)
         bb_player.stack -= bb_actual
         bb_player.current_bet = bb_actual
-        bb_player.last_action = f"BB {bb_actual}" # ★記録
+        bb_player.last_action = f"BB {bb_actual}"
 
         self.highest_bet = max(sb_actual, bb_actual)
         self.pot = sb_actual + bb_actual
@@ -173,7 +173,6 @@ class TexasHoldemEngine:
 
         if self.current_turn == "p1":
             self.message += " あなたの番です。"
-        # ★削除：ここでCPUのターンになっても、React側のタイマーを待つために自動行動はさせない
 
     def reset_game(self, player_name="あなた"):
         self.players["p1"].stack = 1000
@@ -188,9 +187,7 @@ class TexasHoldemEngine:
         if self.phase == Phase.SHOWDOWN:
             return
         self._check_round_end()
-        # ★削除：_play_ai_turn() の自動呼び出しを削除し、フロントからの指令を待つ！
 
-    # ★新規追加：Reactから「1.5秒経ったからCPU動いて！」と言われた時に実行する専用メソッド
     def process_cpu_action(self):
         self.message = ""
         if self.phase != Phase.SHOWDOWN and self.current_turn == "p2":
@@ -202,7 +199,7 @@ class TexasHoldemEngine:
 
         if action_type == "fold":
             player.is_active = False
-            player.last_action = "Fold" # ★記録
+            player.last_action = "Fold"
             self.phase = Phase.SHOWDOWN
             winner = self.players["p2" if player_id == "p1" else "p1"]
             winner.stack += self.pot
@@ -213,10 +210,10 @@ class TexasHoldemEngine:
             call_amount = self.highest_bet - player.current_bet
             if call_amount >= player.stack:
                 call_amount = player.stack
-                player.last_action = "All-In" # ★記録
+                player.last_action = "All-In"
                 self.message += f"🔥{player.name}がオールイン！"
             else:
-                player.last_action = "Check" if call_amount == 0 else f"Call {call_amount}" # ★記録
+                player.last_action = "Check" if call_amount == 0 else f"Call {call_amount}"
                 if call_amount == 0:
                     self.message += f"{player.name}がチェック。"
                 else:
@@ -228,21 +225,24 @@ class TexasHoldemEngine:
             self.current_turn = "p2" if player_id == "p1" else "p1"
             
         elif action_type == "raise":
-            call_amount = self.highest_bet - player.current_bet
-            total_bet = call_amount + amount
-            if total_bet >= player.stack:
-                total_bet = player.stack
-                player.last_action = "All-In" # ★記録
+            # ★修正：amount を「最終到達目標額 (Raise to X)」として扱う
+            target_bet = amount
+            add_amount = target_bet - player.current_bet
+            
+            if add_amount >= player.stack:
+                add_amount = player.stack
+                target_bet = player.current_bet + add_amount
+                player.last_action = "All-In"
                 self.message += f"🔥{player.name}がオールイン！"
             else:
-                player.last_action = f"Raise to {total_bet}" # ★記録
-                self.message += f"{player.name}がレイズ(+{amount})！"
+                player.last_action = f"Raise to {target_bet}"
+                self.message += f"{player.name}がレイズ(to {target_bet})！"
                 
-            player.stack -= total_bet
-            player.current_bet += total_bet
+            player.stack -= add_amount
+            player.current_bet += add_amount
             if player.current_bet > self.highest_bet:
                 self.highest_bet = player.current_bet
-            self.pot += total_bet
+            self.pot += add_amount
             self.current_turn = "p2" if player_id == "p1" else "p1"
 
     def _play_ai_turn(self):
@@ -262,29 +262,31 @@ class TexasHoldemEngine:
 
         choice = random.random()
         action = "call"
-        amount = 0
+        target_amount = 0
 
+        # ★修正：CPUも「Raise to X」の形式で計算してアクションを決定する
         if hand_strength == 2:
             if choice < 0.7:
                 action = "raise"
-                amount = min(self.pot // 2 + 20, p2.stack - call_amount)
+                added = min(self.pot // 2 + 20, p2.stack - call_amount)
+                target_amount = self.highest_bet + added
         elif hand_strength == 1:
             if call_amount > self.pot // 3 and choice < 0.5: action = "fold"
-            elif choice < 0.2: action = "raise"; amount = 50
+            elif choice < 0.2: action = "raise"; target_amount = self.highest_bet + 50
         else:
             if call_amount > 0:
-                if choice < 0.15: action = "raise"; amount = call_amount + 40
+                if choice < 0.15: action = "raise"; target_amount = self.highest_bet + call_amount + 40
                 elif choice < 0.8: action = "fold"
             else:
-                if choice < 0.25: action = "raise"; amount = 30
+                if choice < 0.25: action = "raise"; target_amount = self.highest_bet + 30
 
         if action == "raise":
-            amount = int(amount)
-            if amount <= 0 or p2.stack <= call_amount:
+            target_amount = int(target_amount)
+            if target_amount <= self.highest_bet or p2.stack <= call_amount:
                 action = "call"
-                amount = 0
+                target_amount = 0
             
-        self._apply_action("p2", action, amount)
+        self._apply_action("p2", action, target_amount)
         self._check_round_end()
 
     def _check_round_end(self):
@@ -336,7 +338,7 @@ class TexasHoldemEngine:
         self.highest_bet = 0
         for p in self.players.values(): 
             p.current_bet = 0
-            p.last_action = "" # ★次のフェーズに行ったらアクションの吹き出しを消す
+            p.last_action = ""
 
         if is_all_in and self.phase != Phase.SHOWDOWN:
             self.advance_phase()
@@ -385,7 +387,6 @@ def take_action(action: PlayerAction):
     game_instance.process_action(action.player_id, action.action_type, action.amount)
     return {"status": "success", "game_state": game_instance.get_state()}
 
-# ★新規追加：CPU専用の行動エンドポイント
 @app.post("/api/cpu_action")
 def cpu_action():
     game_instance.process_cpu_action()
