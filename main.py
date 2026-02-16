@@ -213,7 +213,8 @@ class TexasHoldemEngine:
                 player.last_action = "All-In"
                 self.message += f"🔥{player.name}がオールイン！"
             else:
-                player.last_action = "Check" if call_amount == 0 else f"Call {call_amount}"
+                # ★修正：Callの場合、追加額ではなく「テーブル上の最高ベット額」を記録する
+                player.last_action = "Check" if call_amount == 0 else f"Call {self.highest_bet}"
                 if call_amount == 0:
                     self.message += f"{player.name}がチェック。"
                 else:
@@ -225,7 +226,6 @@ class TexasHoldemEngine:
             self.current_turn = "p2" if player_id == "p1" else "p1"
             
         elif action_type == "raise":
-            # ★修正：amount を「最終到達目標額 (Raise to X)」として扱う
             target_bet = amount
             add_amount = target_bet - player.current_bet
             
@@ -264,7 +264,6 @@ class TexasHoldemEngine:
         action = "call"
         target_amount = 0
 
-        # ★修正：CPUも「Raise to X」の形式で計算してアクションを決定する
         if hand_strength == 2:
             if choice < 0.7:
                 action = "raise"
